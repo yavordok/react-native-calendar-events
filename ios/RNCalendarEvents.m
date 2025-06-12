@@ -24,6 +24,7 @@ static NSString *const _isDetached = @"isDetached";
 static NSString *const _availability = @"availability";
 static NSString *const _attendees    = @"attendees";
 static NSString *const _timeZone    = @"timeZone";
+static NSString *_lastPermissionStatus = nil;
 
 dispatch_queue_t serialQueue;
 
@@ -755,40 +756,76 @@ RCT_EXPORT_MODULE()
 #pragma mark -
 #pragma mark RCT Exports
 
-RCT_EXPORT_METHOD(checkPermissions:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXPORT_METHOD(checkPermissions:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
 {
-    NSString *status;
-    EKAuthorizationStatus authStatus = [EKEventStore authorizationStatusForEntityType:EKEntityTypeEvent];
+  NSLog(@"[RNCalendarEvents] checkPermissions called");
 
-    switch (authStatus) {
-        case EKAuthorizationStatusDenied:
-            status = @"denied";
-            break;
-        case EKAuthorizationStatusRestricted:
-            status = @"restricted";
-            break;
-        case EKAuthorizationStatusAuthorized:
-            status = @"authorized";
-            break;
-        default:
-            status = @"undetermined";
-            break;
-    }
+  EKAuthorizationStatus status = [EKEventStore authorizationStatusForEntityType:EKEntityTypeEvent];
+  NSString *result = @"undetermined";
 
-    resolve(status);
+  switch (status) {
+    case EKAuthorizationStatusAuthorized:
+      result = @"authorized";
+      break;
+    case EKAuthorizationStatusDenied:
+      result = @"denied";
+      break;
+    case EKAuthorizationStatusRestricted:
+      result = @"restricted";
+      break;
+    case EKAuthorizationStatusNotDetermined:
+    default:
+      // Fallback to last known status if available
+      if (_lastPermissionStatus != nil) {
+        NSLog(@"[RNCalendarEvents] Falling back to cached status: %@", _lastPermissionStatus);
+        result = _lastPermissionStatus;
+      } else {
+        result = @"undetermined";
+      }
+      break;
+  }
+
+  NSLog(@"[RNCalendarEvents] checkPermissions result: %@", result);
+  resolve(result);
 }
 
-RCT_EXPORT_METHOD(requestPermissions:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
-{
-    [self.eventStore requestAccessToEntityType:EKEntityTypeEvent completion:^(BOOL granted, NSError *error) {
-        NSString *status = granted ? @"authorized" : @"denied";
-        if (!error) {
-            resolve(status);
-        } else {
-            reject(@"error", @"authorization request error", error);
-        }
-    }];
+static NSString *RCTCalendarStatusFromGranted(BOOL granted) {
+  NSString *status = granted ? @"authorized" : @"denied";
+  _lastPermissionStatus = status; // cache result
+  NSLog(@"[RNCalendarEvents] Permission result: %@", status);
+  return status;
 }
+
+RCT_EXPORT_METHOD(requestPermissions:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSLog(@"[RNCalendarEvents] requestPermissions called");
+
+  EKEventStore *store = [EKEventStore new];
+
+  void (^finish)(BOOL, NSError *) = ^(BOOL granted, NSError *err) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (err) {
+        NSLog(@"[RNCalendarEvents] Permission error: %@", err.localizedDescription);
+        reject(@"perm_error", err.localizedDescription, err);
+        return;
+      }
+
+      NSLog(@"[RNCalendarEvents] Permission granted: %@", granted ? @"YES" : @"NO");
+      resolve(RCTCalendarStatusFromGranted(granted));
+    });
+  };
+
+  if (@available(iOS 17, *)) {
+    NSLog(@"[RNCalendarEvents] Using iOS 17+ requestFullAccessToEventsWithCompletion");
+    [store requestFullAccessToEventsWithCompletion:finish];
+  } else {
+    NSLog(@"[RNCalendarEvents] Using legacy requestAccessToEntityType");
+    [store requestAccessToEntityType:EKEntityTypeEvent completion:finish];
+  }
+}
+
 
 RCT_EXPORT_METHOD(findCalendars:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
 {
